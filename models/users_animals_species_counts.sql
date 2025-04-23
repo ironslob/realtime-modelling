@@ -6,7 +6,8 @@
         ],
         update = [
             'user_name',
-            'count'
+            'count',
+            'updated_at'
         ],
         monitor = {
             "users": { "user_id": "id" },

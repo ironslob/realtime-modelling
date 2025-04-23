@@ -3,7 +3,8 @@
         unique = 'user_id',
         update = [
             'user_name',
-            'total_count'
+            'total_count',
+            'updated_at'
         ],
         monitor = {
             "users": { "user_id": "id" },

@@ -90,7 +90,7 @@ def topological_sort(dependencies: Dict[str, Set[str]]) -> List[str]:
 
 
 def build_realtime_where_clause(unique_keys: List[str], prefix: str = "p_") -> str:
-    return " AND ".join(f"{key} = {prefix}{key}" for key in unique_keys)
+    return " AND ".join(f"({prefix}{key} IS NULL OR {key} = {prefix}{key})" for key in unique_keys)
 
 
 def run_sql(*, conn: Connection, sql: str, dry_run: bool, debug: bool) -> None:
@@ -147,6 +147,40 @@ def generate_realtime_procedure_sql(
         ON DUPLICATE KEY UPDATE {update_clause};
     END;
     """
+
+
+def generate_trigger_sql(
+    *,
+    model: str,
+    source_table: str,
+    event: str,
+    param_map: Dict[str, str],
+    all_unique_keys: List[str],
+) -> (str, str):
+    trigger_name = f"trigger_{source_table}_{model}_{event.lower()}"
+    timing = "AFTER"
+    ref_row = "NEW" if event in ("INSERT", "UPDATE") else "OLD"
+
+    # Ensure param order matches the order in the stored procedure
+    params = []
+    for key in all_unique_keys:
+        if key in param_map:
+            params.append(f"{ref_row}.{param_map[key]}")
+        else:
+            params.append("NULL")
+    params_str = ", ".join(params)
+
+    drop_sql = f"DROP TRIGGER IF EXISTS `{trigger_name}`;"
+    create_sql = f"""
+    CREATE TRIGGER `{trigger_name}`
+    {timing} {event} ON `{source_table}`
+    FOR EACH ROW
+    BEGIN
+        CALL `realtime_update_{model}`({params_str});
+    END;
+    """
+
+    return drop_sql, create_sql
 
 
 def create_realtime_procedure(
@@ -266,6 +300,18 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
                 dry_run=dry_run,
                 debug=debug,
             )
+
+            for source_table, param_map in config_data.monitor.items():
+                for event in ["INSERT", "UPDATE", "DELETE"]:
+                    drop_sql, create_sql = generate_trigger_sql(
+                        model=model,
+                        source_table=source_table,
+                        event=event,
+                        param_map=param_map,
+                        all_unique_keys=config_data.unique,
+                    )
+                    run_sql(conn=conn, sql=drop_sql, dry_run=dry_run, debug=debug)
+                    run_sql(conn=conn, sql=create_sql, dry_run=dry_run, debug=debug)
 
 
 if __name__ == "__main__":

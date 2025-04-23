@@ -1,15 +1,13 @@
 import os
 import logging
 import click
-from typing import List, Dict, Set, Union
+from typing import List, Dict, Set, Union, Optional
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, Connection
-
-# --- Model Configuration Tracking ---
 
 @dataclass
 class ModelConfig:
@@ -40,8 +38,6 @@ class ConfigTracker:
         if isinstance(val, str):
             return [val]
         return val or []
-
-# --- Dependency Extraction ---
 
 def extract_dependencies(*, env: Environment, source: str) -> Set[str]:
     deps: Set[str] = set()
@@ -91,8 +87,6 @@ def topological_sort(dependencies: Dict[str, Set[str]]) -> List[str]:
 
     return result
 
-# --- SQL Helpers ---
-
 def build_realtime_where_clause(unique_keys: List[str], prefix: str = "p_") -> str:
     return ' AND '.join(f"{key} = {prefix}{key}" for key in unique_keys)
 
@@ -101,8 +95,6 @@ def run_sql(*, conn: Connection, sql: str, dry_run: bool, debug: bool) -> None:
         logging.debug(f"Executing SQL:\n{sql.strip()}")
     if not dry_run:
         conn.execute(text(sql.strip()))
-
-# --- Model Builders ---
 
 def execute_model_sql(*, conn: Connection, model: str, sql: str, config: ModelConfig, dry_run: bool, debug: bool):
     run_sql(conn=conn, sql=f"DROP TABLE IF EXISTS `{model}`", dry_run=dry_run, debug=debug)
@@ -136,12 +128,11 @@ def create_realtime_procedure(*, conn: Connection, model: str, sql: str, dry_run
     run_sql(conn=conn, sql=f"DROP PROCEDURE IF EXISTS `realtime_update_{model}`;", dry_run=dry_run, debug=debug)
     run_sql(conn=conn, sql=sql, dry_run=dry_run, debug=debug)
 
-# --- Main CLI ---
-
 @click.command()
 @click.option("--debug", is_flag=True, help="Enable debug logging.")
 @click.option("--dry-run", is_flag=True, help="Build everything but don’t execute SQL.")
-def main(debug: bool, dry_run: bool):
+@click.option("--model", "model_filter", type=str, default=None, help="Only build this model and its dependencies.")
+def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
     if debug:
         logging.basicConfig(level=logging.DEBUG, format="[debug] %(message)s")
     else:
@@ -159,14 +150,12 @@ def main(debug: bool, dry_run: bool):
         lstrip_blocks=True,
     )
 
-    # Load model files
     model_sources = {
         os.path.splitext(f)[0]: open(os.path.join("models", f)).read()
         for f in os.listdir("models")
         if f.endswith(".sql")
     }
 
-    # Build dependency graph
     logging.info("🔍 Extracting model dependencies...")
     dependencies = {
         model: extract_dependencies(env=env, source=source)
@@ -174,6 +163,13 @@ def main(debug: bool, dry_run: bool):
     }
 
     execution_order = topological_sort(dependencies)
+
+    if model_filter:
+        if model_filter not in execution_order:
+            raise ValueError(f"Model '{model_filter}' not found.")
+        index = execution_order.index(model_filter)
+        execution_order = execution_order[:index + 1]
+
     logging.info(f"✅ Execution order: {execution_order}")
 
     with engine.connect() as conn:
@@ -202,7 +198,6 @@ def main(debug: bool, dry_run: bool):
                 debug=debug,
             )
 
-            # Create realtime procedure
             where_clause = build_realtime_where_clause(config_data.unique)
             rendered_proc_sql = generate_realtime_procedure_sql(
                 model=model,
@@ -220,3 +215,4 @@ def main(debug: bool, dry_run: bool):
 
 if __name__ == "__main__":
     main()
+

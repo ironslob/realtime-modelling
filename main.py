@@ -9,6 +9,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, Connection
 
+
 @dataclass
 class ModelConfig:
     unique: List[str] = field(default_factory=list)
@@ -18,6 +19,7 @@ class ModelConfig:
     def is_valid(self) -> bool:
         return bool(self.unique and self.update and self.monitor)
 
+
 class ConfigTracker:
     def __init__(self):
         self.config_data = ModelConfig()
@@ -26,7 +28,7 @@ class ConfigTracker:
         self,
         unique: Union[str, List[str]],
         update: Union[str, List[str]],
-        monitor: Union[Dict[str, Dict[str, str]], None]
+        monitor: Union[Dict[str, Dict[str, str]], None],
     ) -> str:
         self.config_data.unique = self._normalize_list(unique)
         self.config_data.update = self._normalize_list(update)
@@ -39,6 +41,7 @@ class ConfigTracker:
             return [val]
         return val or []
 
+
 def extract_dependencies(*, env: Environment, source: str) -> Set[str]:
     deps: Set[str] = set()
 
@@ -49,12 +52,10 @@ def extract_dependencies(*, env: Environment, source: str) -> Set[str]:
 
     tracker = ConfigTracker()
     env.from_string(source).render(
-        config=tracker.set_config,
-        ref=ref,
-        realtime=False,
-        realtime_where_clause=""
+        config=tracker.set_config, ref=ref, realtime=False, realtime_where_clause=""
     )
     return deps
+
 
 def topological_sort(dependencies: Dict[str, Set[str]]) -> List[str]:
     in_degree = {model: 0 for model in dependencies}
@@ -87,8 +88,10 @@ def topological_sort(dependencies: Dict[str, Set[str]]) -> List[str]:
 
     return result
 
+
 def build_realtime_where_clause(unique_keys: List[str], prefix: str = "p_") -> str:
-    return ' AND '.join(f"{key} = {prefix}{key}" for key in unique_keys)
+    return " AND ".join(f"{key} = {prefix}{key}" for key in unique_keys)
+
 
 def run_sql(*, conn: Connection, sql: str, dry_run: bool, debug: bool) -> None:
     if debug:
@@ -96,16 +99,37 @@ def run_sql(*, conn: Connection, sql: str, dry_run: bool, debug: bool) -> None:
     if not dry_run:
         conn.execute(text(sql.strip()))
 
-def execute_model_sql(*, conn: Connection, model: str, sql: str, config: ModelConfig, dry_run: bool, debug: bool):
-    run_sql(conn=conn, sql=f"DROP TABLE IF EXISTS `{model}`", dry_run=dry_run, debug=debug)
-    run_sql(conn=conn, sql=f"CREATE TABLE `{model}` AS\n{sql}", dry_run=dry_run, debug=debug)
+
+def execute_model_sql(
+    *,
+    conn: Connection,
+    model: str,
+    sql: str,
+    config: ModelConfig,
+    dry_run: bool,
+    debug: bool,
+):
+    run_sql(
+        conn=conn, sql=f"DROP TABLE IF EXISTS `{model}`", dry_run=dry_run, debug=debug
+    )
+    run_sql(
+        conn=conn, sql=f"CREATE TABLE `{model}` AS\n{sql}", dry_run=dry_run, debug=debug
+    )
 
     if config.unique:
-        cols = ', '.join(f"`{col}`" for col in config.unique)
+        cols = ", ".join(f"`{col}`" for col in config.unique)
         constraint_name = f"{model}_uniq"
-        run_sql(conn=conn, sql=f"ALTER TABLE `{model}` ADD CONSTRAINT `{constraint_name}` UNIQUE ({cols})", dry_run=dry_run, debug=debug)
+        run_sql(
+            conn=conn,
+            sql=f"ALTER TABLE `{model}` ADD CONSTRAINT `{constraint_name}` UNIQUE ({cols})",
+            dry_run=dry_run,
+            debug=debug,
+        )
 
-def generate_realtime_procedure_sql(*, model: str, config: ModelConfig, raw_sql: str, where_clause: str) -> str:
+
+def generate_realtime_procedure_sql(
+    *, model: str, config: ModelConfig, raw_sql: str, where_clause: str
+) -> str:
     param_defs = ",\n    ".join(f"IN p_{col} TEXT" for col in config.unique)
     update_clause = ", ".join(f"`{col}` = VALUES(`{col}`)" for col in config.update)
 
@@ -124,11 +148,22 @@ def generate_realtime_procedure_sql(*, model: str, config: ModelConfig, raw_sql:
     END;
     """
 
-def create_realtime_procedure(*, conn: Connection, model: str, sql: str, dry_run: bool, debug: bool):
-    run_sql(conn=conn, sql=f"DROP PROCEDURE IF EXISTS `realtime_update_{model}`;", dry_run=dry_run, debug=debug)
+
+def create_realtime_procedure(
+    *, conn: Connection, model: str, sql: str, dry_run: bool, debug: bool
+):
+    run_sql(
+        conn=conn,
+        sql=f"DROP PROCEDURE IF EXISTS `realtime_update_{model}`;",
+        dry_run=dry_run,
+        debug=debug,
+    )
     run_sql(conn=conn, sql=sql, dry_run=dry_run, debug=debug)
 
-def get_transitive_dependencies(model: str, dependencies: Dict[str, Set[str]]) -> Set[str]:
+
+def get_transitive_dependencies(
+    model: str, dependencies: Dict[str, Set[str]]
+) -> Set[str]:
     visited = set()
 
     def visit(m: str):
@@ -140,10 +175,17 @@ def get_transitive_dependencies(model: str, dependencies: Dict[str, Set[str]]) -
     visit(model)
     return visited
 
+
 @click.command()
 @click.option("--debug", is_flag=True, help="Enable debug logging.")
 @click.option("--dry-run", is_flag=True, help="Build everything but don’t execute SQL.")
-@click.option("--model", "model_filter", type=str, default=None, help="Only build this model and its dependencies.")
+@click.option(
+    "--model",
+    "model_filter",
+    type=str,
+    default=None,
+    help="Only build this model and its dependencies.",
+)
 def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
     if debug:
         logging.basicConfig(level=logging.DEBUG, format="[debug] %(message)s")
@@ -194,7 +236,7 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
                 config=tracker.set_config,
                 ref=lambda name: name,
                 realtime=False,
-                realtime_where_clause=""
+                realtime_where_clause="",
             )
 
             config_data = tracker.config_data
@@ -215,7 +257,7 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
                 model=model,
                 config=config_data,
                 raw_sql=rendered_sql,
-                where_clause=where_clause
+                where_clause=where_clause,
             )
             create_realtime_procedure(
                 conn=conn,
@@ -225,6 +267,6 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
                 debug=debug,
             )
 
+
 if __name__ == "__main__":
     main()
-

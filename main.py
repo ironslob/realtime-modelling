@@ -114,10 +114,10 @@ def generate_realtime_procedure_sql(*, model: str, config: ModelConfig, raw_sql:
         {param_defs}
     )
     BEGIN
+        INSERT INTO `{model}`
         WITH derived AS (
             {raw_sql.strip().rstrip(';')}
         )
-        INSERT INTO `{model}`
         SELECT * FROM derived
         WHERE {where_clause}
         ON DUPLICATE KEY UPDATE {update_clause};
@@ -127,6 +127,18 @@ def generate_realtime_procedure_sql(*, model: str, config: ModelConfig, raw_sql:
 def create_realtime_procedure(*, conn: Connection, model: str, sql: str, dry_run: bool, debug: bool):
     run_sql(conn=conn, sql=f"DROP PROCEDURE IF EXISTS `realtime_update_{model}`;", dry_run=dry_run, debug=debug)
     run_sql(conn=conn, sql=sql, dry_run=dry_run, debug=debug)
+
+def get_transitive_dependencies(model: str, dependencies: Dict[str, Set[str]]) -> Set[str]:
+    visited = set()
+
+    def visit(m: str):
+        if m not in visited:
+            visited.add(m)
+            for dep in dependencies.get(m, set()):
+                visit(dep)
+
+    visit(model)
+    return visited
 
 @click.command()
 @click.option("--debug", is_flag=True, help="Enable debug logging.")
@@ -165,10 +177,10 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
     execution_order = topological_sort(dependencies)
 
     if model_filter:
-        if model_filter not in execution_order:
+        if model_filter not in model_sources:
             raise ValueError(f"Model '{model_filter}' not found.")
-        index = execution_order.index(model_filter)
-        execution_order = execution_order[:index + 1]
+        keep = get_transitive_dependencies(model_filter, dependencies) | {model_filter}
+        execution_order = [m for m in execution_order if m in keep]
 
     logging.info(f"✅ Execution order: {execution_order}")
 

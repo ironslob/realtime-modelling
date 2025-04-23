@@ -17,4 +17,4 @@ SELECT
     CURRENT_TIMESTAMP AS created_at,
     CURRENT_TIMESTAMP AS updated_at
 FROM {{ ref('users_animals_species_counts') }}
-GROUP BY user_id
+GROUP BY user_id, user_name

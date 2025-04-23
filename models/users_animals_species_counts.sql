@@ -23,6 +23,6 @@ SELECT
     CURRENT_TIMESTAMP AS created_at,
     CURRENT_TIMESTAMP AS updated_at
 FROM users u
-LEFT JOIN animals a ON a.user_id = u.id
-LEFT JOIN species s ON s.id = a.species_id
+JOIN animals a ON a.user_id = u.id
+JOIN species s ON s.id = a.species_id
 GROUP BY u.id, s.id

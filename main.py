@@ -149,6 +149,31 @@ def generate_realtime_procedure_sql(
     """
 
 
+def generate_realtime_prune_procedure_sql(
+    *, model: str, config: ModelConfig, raw_sql: str
+) -> str:
+    param_defs = ",\n    ".join(f"IN p_{col} TEXT" for col in config.unique)
+    where_clause = " AND ".join(
+        f"(p_{col} IS NULL OR {col} = p_{col})" for col in config.unique
+    )
+    key_tuple = ", ".join(config.unique)
+
+    return f"""
+    CREATE PROCEDURE `realtime_prune_{model}`(
+        {param_defs}
+    )
+    BEGIN
+        DELETE FROM `{model}`
+        WHERE {where_clause}
+        AND ({key_tuple}) NOT IN (
+            SELECT {key_tuple} FROM (
+                {raw_sql.strip().rstrip(';')}
+            ) AS derived
+        );
+    END;
+    """
+
+
 def generate_trigger_sql(
     *,
     model: str,
@@ -156,31 +181,32 @@ def generate_trigger_sql(
     event: str,
     param_map: Dict[str, str],
     all_unique_keys: List[str],
-) -> (str, str):
+) -> List[str]:
     trigger_name = f"trigger_{source_table}_{model}_{event.lower()}"
     timing = "AFTER"
     ref_row = "NEW" if event in ("INSERT", "UPDATE") else "OLD"
 
-    # Ensure param order matches the order in the stored procedure
     params = []
     for key in all_unique_keys:
         if key in param_map:
             params.append(f"{ref_row}.{param_map[key]}")
         else:
             params.append("NULL")
-    params_str = ", ".join(params)
+    param_str = ", ".join(params)
 
-    drop_sql = f"DROP TRIGGER IF EXISTS `{trigger_name}`;"
-    create_sql = f"""
-    CREATE TRIGGER `{trigger_name}`
-    {timing} {event} ON `{source_table}`
-    FOR EACH ROW
-    BEGIN
-        CALL `realtime_update_{model}`({params_str});
-    END;
-    """
-
-    return drop_sql, create_sql
+    sqls = [
+        f"DROP TRIGGER IF EXISTS `{trigger_name}`;",
+        f"""
+        CREATE TRIGGER `{trigger_name}`
+        {timing} {event} ON `{source_table}`
+        FOR EACH ROW
+        BEGIN
+            CALL `realtime_update_{model}`({param_str});
+            {"CALL `realtime_prune_" + model + f"`({param_str});" if event in ("DELETE", "UPDATE") else ""}
+        END;
+        """
+    ]
+    return sqls
 
 
 def create_realtime_procedure(
@@ -189,6 +215,18 @@ def create_realtime_procedure(
     run_sql(
         conn=conn,
         sql=f"DROP PROCEDURE IF EXISTS `realtime_update_{model}`;",
+        dry_run=dry_run,
+        debug=debug,
+    )
+    run_sql(conn=conn, sql=sql, dry_run=dry_run, debug=debug)
+
+
+def create_prune_procedure(
+    *, conn: Connection, model: str, sql: str, dry_run: bool, debug: bool
+):
+    run_sql(
+        conn=conn,
+        sql=f"DROP PROCEDURE IF EXISTS `realtime_prune_{model}`;",
         dry_run=dry_run,
         debug=debug,
     )
@@ -287,7 +325,7 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
             )
 
             where_clause = build_realtime_where_clause(config_data.unique)
-            rendered_proc_sql = generate_realtime_procedure_sql(
+            update_proc_sql = generate_realtime_procedure_sql(
                 model=model,
                 config=config_data,
                 raw_sql=rendered_sql,
@@ -296,22 +334,34 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
             create_realtime_procedure(
                 conn=conn,
                 model=model,
-                sql=rendered_proc_sql,
+                sql=update_proc_sql,
+                dry_run=dry_run,
+                debug=debug,
+            )
+
+            prune_proc_sql = generate_realtime_prune_procedure_sql(
+                model=model,
+                config=config_data,
+                raw_sql=rendered_sql,
+            )
+            create_prune_procedure(
+                conn=conn,
+                model=model,
+                sql=prune_proc_sql,
                 dry_run=dry_run,
                 debug=debug,
             )
 
             for source_table, param_map in config_data.monitor.items():
                 for event in ["INSERT", "UPDATE", "DELETE"]:
-                    drop_sql, create_sql = generate_trigger_sql(
+                    for sql in generate_trigger_sql(
                         model=model,
                         source_table=source_table,
                         event=event,
                         param_map=param_map,
                         all_unique_keys=config_data.unique,
-                    )
-                    run_sql(conn=conn, sql=drop_sql, dry_run=dry_run, debug=debug)
-                    run_sql(conn=conn, sql=create_sql, dry_run=dry_run, debug=debug)
+                    ):
+                        run_sql(conn=conn, sql=sql, dry_run=dry_run, debug=debug)
 
 
 if __name__ == "__main__":

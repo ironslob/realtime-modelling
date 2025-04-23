@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "realtime-modelling"
+version = "0.1.0"
+description = ""
+authors = ["Matt Wilson"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+sqlparse = "^0.5.3"
+jinja2 = "^3.1.6"
+sqlalchemy = "^2.0.40"
+mysql-connector-python = "^9.3.0"
+
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = "^4.2.0"
+black = "^25.1.0"
+pylint = "^3.3.6"
+isort = "^6.0.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

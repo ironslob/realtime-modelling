@@ -131,7 +131,7 @@ class DatabaseAdapter(ABC):
         pass
 
     @abstractmethod
-    def create_procedure(self, name: str, params: List[str], body: str) -> str:
+    def create_procedure(self, name: str, params: List[str], body: str, conn: Optional[Connection] = None) -> str:
         """Generate SQL to create a stored procedure/function."""
         pass
 
@@ -191,7 +191,7 @@ class MySQLAdapter(DatabaseAdapter):
         )
         return f"ON DUPLICATE KEY UPDATE {quoted_cols}"
 
-    def create_procedure(self, name: str, params: List[str], body: str) -> str:
+    def create_procedure(self, name: str, params: List[str], body: str, conn: Optional[Connection] = None) -> str:
         param_defs = ",\n    ".join(f"IN {param} TEXT" for param in params)
         return f"""
         CREATE PROCEDURE {self.quote_identifier(name)}(
@@ -282,10 +282,7 @@ class PostgreSQLAdapter(DatabaseAdapter):
         result = conn.execute(text(query), {"table_name": table_name})
         return {row[0]: row[1] for row in result}
 
-    def create_procedure(
-        self, name: str, params: List[str], body: str, conn: Optional[Connection] = None
-    ) -> str:
-        # For PostgreSQL, we'll use the actual column types if available
+    def create_procedure(self, name: str, params: List[str], body: str, conn: Optional[Connection] = None) -> str:
         param_defs = []
         if conn is not None:
             # Extract the table name from the procedure name (e.g., realtime_update_users -> users)

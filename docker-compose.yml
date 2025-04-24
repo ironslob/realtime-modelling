@@ -14,4 +14,18 @@ services:
       - "3306:3306"
     volumes:
       - ./mysql-data:/var/lib/mysql
-      - ./bootstrap.sql:/docker-entrypoint-initdb.d/bootstrap.sql
+      - ./bootstrap-mysql.sql:/docker-entrypoint-initdb.d/bootstrap.sql
+
+  postgres:
+    image: postgres:16.2
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mydb
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+      - ./bootstrap-postgresql.sql:/docker-entrypoint-initdb.d/bootstrap.sql

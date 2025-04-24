@@ -1,9 +1,11 @@
 import os
 import logging
 import click
-from typing import List, Dict, Set, Union, Optional
+from typing import List, Dict, Set, Union, Optional, Type
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
+from urllib.parse import urlparse
+from abc import ABC, abstractmethod
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from sqlalchemy import create_engine, text
@@ -105,6 +107,172 @@ def run_sql(*, conn: Connection, sql: str, dry_run: bool, debug: bool) -> None:
         conn.execute(text(sql.strip()))
 
 
+class DatabaseAdapter(ABC):
+    @classmethod
+    @abstractmethod
+    def can_handle(cls, database_url: str) -> bool:
+        """Check if this adapter can handle the given database URL."""
+        pass
+
+    @abstractmethod
+    def quote_identifier(self, identifier: str) -> str:
+        """Quote an identifier according to the database's syntax."""
+        pass
+
+    @abstractmethod
+    def drop_table_if_exists(self, table_name: str) -> str:
+        """Generate SQL to drop a table if it exists."""
+        pass
+
+    @abstractmethod
+    def create_table_as(self, table_name: str, sql: str) -> str:
+        """Generate SQL to create a table from a SELECT statement."""
+        pass
+
+    @abstractmethod
+    def add_unique_constraint(self, table_name: str, constraint_name: str, columns: List[str]) -> str:
+        """Generate SQL to add a unique constraint."""
+        pass
+
+    @abstractmethod
+    def upsert_clause(self, table_name: str, update_columns: List[str]) -> str:
+        """Generate SQL for upsert operations."""
+        pass
+
+    @abstractmethod
+    def create_procedure(self, name: str, params: List[str], body: str) -> str:
+        """Generate SQL to create a stored procedure/function."""
+        pass
+
+    @abstractmethod
+    def drop_procedure(self, name: str) -> str:
+        """Generate SQL to drop a stored procedure/function."""
+        pass
+
+    @abstractmethod
+    def create_trigger(self, name: str, table: str, timing: str, event: str, body: str) -> str:
+        """Generate SQL to create a trigger."""
+        pass
+
+    @abstractmethod
+    def drop_trigger(self, name: str) -> str:
+        """Generate SQL to drop a trigger."""
+        pass
+
+
+class MySQLAdapter(DatabaseAdapter):
+    @classmethod
+    def can_handle(cls, database_url: str) -> bool:
+        return urlparse(database_url).scheme.startswith('mysql')
+
+    def quote_identifier(self, identifier: str) -> str:
+        return f'`{identifier}`'
+
+    def drop_table_if_exists(self, table_name: str) -> str:
+        return f'DROP TABLE IF EXISTS {self.quote_identifier(table_name)}'
+
+    def create_table_as(self, table_name: str, sql: str) -> str:
+        return f'CREATE TABLE {self.quote_identifier(table_name)} AS\n{sql}'
+
+    def add_unique_constraint(self, table_name: str, constraint_name: str, columns: List[str]) -> str:
+        quoted_cols = ", ".join(self.quote_identifier(col) for col in columns)
+        return f'ALTER TABLE {self.quote_identifier(table_name)} ADD CONSTRAINT {self.quote_identifier(constraint_name)} UNIQUE ({quoted_cols})'
+
+    def upsert_clause(self, table_name: str, update_columns: List[str]) -> str:
+        quoted_cols = ", ".join(f"{self.quote_identifier(col)} = VALUES({self.quote_identifier(col)})" for col in update_columns)
+        return f"ON DUPLICATE KEY UPDATE {quoted_cols}"
+
+    def create_procedure(self, name: str, params: List[str], body: str) -> str:
+        param_defs = ",\n    ".join(f"IN {param} TEXT" for param in params)
+        return f"""
+        CREATE PROCEDURE {self.quote_identifier(name)}(
+            {param_defs}
+        )
+        BEGIN
+            {body}
+        END;
+        """
+
+    def drop_procedure(self, name: str) -> str:
+        return f'DROP PROCEDURE IF EXISTS {self.quote_identifier(name)}'
+
+    def create_trigger(self, name: str, table: str, timing: str, event: str, body: str) -> str:
+        return f"""
+        CREATE TRIGGER {self.quote_identifier(name)}
+        {timing} {event} ON {self.quote_identifier(table)}
+        FOR EACH ROW
+        BEGIN
+            {body}
+        END;
+        """
+
+    def drop_trigger(self, name: str) -> str:
+        return f'DROP TRIGGER IF EXISTS {self.quote_identifier(name)}'
+
+
+class PostgreSQLAdapter(DatabaseAdapter):
+    @classmethod
+    def can_handle(cls, database_url: str) -> bool:
+        return urlparse(database_url).scheme.startswith('postgresql')
+
+    def quote_identifier(self, identifier: str) -> str:
+        return f'"{identifier}"'
+
+    def drop_table_if_exists(self, table_name: str) -> str:
+        return f'DROP TABLE IF EXISTS {self.quote_identifier(table_name)} CASCADE'
+
+    def create_table_as(self, table_name: str, sql: str) -> str:
+        return f'CREATE TABLE {self.quote_identifier(table_name)} AS\n{sql}'
+
+    def add_unique_constraint(self, table_name: str, constraint_name: str, columns: List[str]) -> str:
+        quoted_cols = ", ".join(self.quote_identifier(col) for col in columns)
+        return f'ALTER TABLE {self.quote_identifier(table_name)} ADD CONSTRAINT {self.quote_identifier(constraint_name)} UNIQUE ({quoted_cols})'
+
+    def upsert_clause(self, table_name: str, update_columns: List[str]) -> str:
+        quoted_cols = ", ".join(self.quote_identifier(col) for col in update_columns)
+        return f"ON CONFLICT DO UPDATE SET {quoted_cols} = EXCLUDED.{quoted_cols}"
+
+    def create_procedure(self, name: str, params: List[str], body: str) -> str:
+        param_defs = ", ".join(f"{param} TEXT" for param in params)
+        return f"""
+        CREATE OR REPLACE FUNCTION {self.quote_identifier(name)}(
+            {param_defs}
+        ) RETURNS void AS $$
+        BEGIN
+            {body}
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+
+    def drop_procedure(self, name: str) -> str:
+        return f'DROP FUNCTION IF EXISTS {self.quote_identifier(name)} CASCADE'
+
+    def create_trigger(self, name: str, table: str, timing: str, event: str, body: str) -> str:
+        return f"""
+        CREATE OR REPLACE TRIGGER {self.quote_identifier(name)}
+        {timing} {event} ON {self.quote_identifier(table)}
+        FOR EACH ROW
+        EXECUTE FUNCTION {self.quote_identifier(name)}_fn();
+        """
+
+    def drop_trigger(self, name: str) -> str:
+        return f'DROP TRIGGER IF EXISTS {self.quote_identifier(name)} ON {self.quote_identifier(name.split("_")[1])} CASCADE'
+
+
+def get_database_adapter(database_url: str) -> DatabaseAdapter:
+    """Factory function to get the appropriate database adapter."""
+    adapters: List[Type[DatabaseAdapter]] = [
+        MySQLAdapter,
+        PostgreSQLAdapter,
+    ]
+    
+    for adapter_class in adapters:
+        if adapter_class.can_handle(database_url):
+            return adapter_class()
+    
+    raise ValueError(f"No adapter found for database URL: {database_url}")
+
+
 def execute_model_sql(
     *,
     conn: Connection,
@@ -113,66 +281,65 @@ def execute_model_sql(
     config: ModelConfig,
     dry_run: bool,
     debug: bool,
+    db_adapter: DatabaseAdapter,
 ):
-    run_sql(conn=conn, sql=f"DROP TABLE IF EXISTS `{model}`", dry_run=dry_run, debug=debug)
-    run_sql(conn=conn, sql=f"CREATE TABLE `{model}` AS\n{sql}", dry_run=dry_run, debug=debug)
+    run_sql(conn=conn, sql=db_adapter.drop_table_if_exists(model), dry_run=dry_run, debug=debug)
+    run_sql(conn=conn, sql=db_adapter.create_table_as(model, sql), dry_run=dry_run, debug=debug)
 
     if config.unique:
-        cols = ", ".join(f"`{col}`" for col in config.unique)
+        cols = config.unique
         constraint_name = f"{model}_uniq"
         run_sql(
             conn=conn,
-            sql=f"ALTER TABLE `{model}` ADD CONSTRAINT `{constraint_name}` UNIQUE ({cols})",
+            sql=db_adapter.add_unique_constraint(model, constraint_name, cols),
             dry_run=dry_run,
             debug=debug,
         )
 
 
 def generate_realtime_procedure_sql(
-    *, model: str, config: ModelConfig, raw_sql: str, where_clause: str
+    *, model: str, config: ModelConfig, raw_sql: str, where_clause: str, db_adapter: DatabaseAdapter
 ) -> str:
-    param_defs = ",\n    ".join(f"IN p_{col} TEXT" for col in config.unique)
-    update_clause = ", ".join(f"`{col}` = VALUES(`{col}`)" for col in config.update)
+    param_defs = [f"p_{col}" for col in config.unique]
+    update_clause = db_adapter.upsert_clause(model, config.update)
 
-    return f"""
-    CREATE PROCEDURE `realtime_update_{model}`(
-        {param_defs}
-    )
-    BEGIN
-        INSERT INTO `{model}`
+    return db_adapter.create_procedure(
+        f"realtime_update_{model}",
+        param_defs,
+        f"""
+        INSERT INTO {db_adapter.quote_identifier(model)}
         WITH derived AS (
             {raw_sql.strip().rstrip(';')}
         )
         SELECT * FROM derived
         WHERE {where_clause}
-        ON DUPLICATE KEY UPDATE {update_clause};
-    END;
-    """
+        {update_clause};
+        """
+    )
 
 
 def generate_realtime_prune_procedure_sql(
-    *, model: str, config: ModelConfig, raw_sql: str
+    *, model: str, config: ModelConfig, raw_sql: str, db_adapter: DatabaseAdapter
 ) -> str:
-    param_defs = ",\n    ".join(f"IN p_{col} TEXT" for col in config.unique)
+    param_defs = [f"p_{col}" for col in config.unique]
     where_clause = " AND ".join(
-        f"(p_{col} IS NULL OR {col} = p_{col})" for col in config.unique
+        f"(p_{col} IS NULL OR {db_adapter.quote_identifier(col)} = p_{col})" for col in config.unique
     )
     key_tuple = ", ".join(config.unique)
 
-    return f"""
-    CREATE PROCEDURE `realtime_prune_{model}`(
-        {param_defs}
-    )
-    BEGIN
-        DELETE FROM `{model}`
+    return db_adapter.create_procedure(
+        f"realtime_prune_{model}",
+        param_defs,
+        f"""
+        DELETE FROM {db_adapter.quote_identifier(model)}
         WHERE {where_clause}
         AND ({key_tuple}) NOT IN (
             SELECT {key_tuple} FROM (
                 {raw_sql.strip().rstrip(';')}
             ) AS derived
         );
-    END;
-    """
+        """
+    )
 
 
 def generate_trigger_sql(
@@ -183,6 +350,7 @@ def generate_trigger_sql(
     param_map: Dict[str, str],
     all_unique_keys: List[str],
     config: ModelConfig,
+    db_adapter: DatabaseAdapter,
 ) -> List[str]:
     trigger_name = f"trigger_{source_table}_{model}_{event.lower()}"
     timing = "AFTER"
@@ -196,41 +364,40 @@ def generate_trigger_sql(
             params.append("NULL")
     param_str = ", ".join(params)
 
-    sqls = [f"DROP TRIGGER IF EXISTS `{trigger_name}`;"]
+    sqls = [db_adapter.drop_trigger(trigger_name)]
 
-    call_lines = [f"CALL `realtime_update_{model}`({param_str});"]
+    call_lines = [f"CALL {db_adapter.quote_identifier(f'realtime_update_{model}')}({param_str});"]
 
     if config.prune:
         if event == "DELETE" and config.prune_on_delete:
-            call_lines.append(f"CALL `realtime_prune_{model}`({param_str});")
+            call_lines.append(f"CALL {db_adapter.quote_identifier(f'realtime_prune_{model}')}({param_str});")
         elif event == "UPDATE" and config.prune_on_update:
-            call_lines.append(f"CALL `realtime_prune_{model}`({param_str});")
+            call_lines.append(f"CALL {db_adapter.quote_identifier(f'realtime_prune_{model}')}({param_str});")
 
     body = "\n        ".join(call_lines)
 
-    sqls.append(f"""
-    CREATE TRIGGER `{trigger_name}`
-    {timing} {event} ON `{source_table}`
-    FOR EACH ROW
-    BEGIN
-        {body}
-    END;
-    """)
+    sqls.append(db_adapter.create_trigger(
+        trigger_name,
+        source_table,
+        timing,
+        event,
+        body
+    ))
 
     return sqls
 
 
 def create_realtime_procedure(
-    *, conn: Connection, model: str, sql: str, dry_run: bool, debug: bool
+    *, conn: Connection, model: str, sql: str, dry_run: bool, debug: bool, db_adapter: DatabaseAdapter
 ):
-    run_sql(conn=conn, sql=f"DROP PROCEDURE IF EXISTS `realtime_update_{model}`;", dry_run=dry_run, debug=debug)
+    run_sql(conn=conn, sql=db_adapter.drop_procedure(f"realtime_update_{model}"), dry_run=dry_run, debug=debug)
     run_sql(conn=conn, sql=sql, dry_run=dry_run, debug=debug)
 
 
 def create_prune_procedure(
-    *, conn: Connection, model: str, sql: str, dry_run: bool, debug: bool
+    *, conn: Connection, model: str, sql: str, dry_run: bool, debug: bool, db_adapter: DatabaseAdapter
 ):
-    run_sql(conn=conn, sql=f"DROP PROCEDURE IF EXISTS `realtime_prune_{model}`;", dry_run=dry_run, debug=debug)
+    run_sql(conn=conn, sql=db_adapter.drop_procedure(f"realtime_prune_{model}"), dry_run=dry_run, debug=debug)
     run_sql(conn=conn, sql=sql, dry_run=dry_run, debug=debug)
 
 
@@ -251,7 +418,7 @@ def get_transitive_dependencies(
 
 @click.command()
 @click.option("--debug", is_flag=True, help="Enable debug logging.")
-@click.option("--dry-run", is_flag=True, help="Build everything but don’t execute SQL.")
+@click.option("--dry-run", is_flag=True, help="Build everything but don't execute SQL.")
 @click.option("--model", "model_filter", type=str, default=None, help="Only build this model and its dependencies.")
 def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
     if debug:
@@ -263,6 +430,7 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
     if not DATABASE_URL:
         raise EnvironmentError("Missing DATABASE_URL")
 
+    db_adapter = get_database_adapter(DATABASE_URL)
     engine: Engine = create_engine(DATABASE_URL)
     env: Environment = Environment(
         loader=FileSystemLoader("models/"),
@@ -316,6 +484,7 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
                 config=config_data,
                 dry_run=dry_run,
                 debug=debug,
+                db_adapter=db_adapter,
             )
 
             where_clause = build_realtime_where_clause(config_data.unique)
@@ -324,16 +493,18 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
                 config=config_data,
                 raw_sql=rendered_sql,
                 where_clause=where_clause,
+                db_adapter=db_adapter,
             )
-            create_realtime_procedure(conn=conn, model=model, sql=update_proc_sql, dry_run=dry_run, debug=debug)
+            create_realtime_procedure(conn=conn, model=model, sql=update_proc_sql, dry_run=dry_run, debug=debug, db_adapter=db_adapter)
 
             if config_data.prune:
                 prune_proc_sql = generate_realtime_prune_procedure_sql(
                     model=model,
                     config=config_data,
                     raw_sql=rendered_sql,
+                    db_adapter=db_adapter,
                 )
-                create_prune_procedure(conn=conn, model=model, sql=prune_proc_sql, dry_run=dry_run, debug=debug)
+                create_prune_procedure(conn=conn, model=model, sql=prune_proc_sql, dry_run=dry_run, debug=debug, db_adapter=db_adapter)
 
             for source_table, param_map in config_data.monitor.items():
                 for event in ["INSERT", "UPDATE", "DELETE"]:
@@ -344,6 +515,7 @@ def main(debug: bool, dry_run: bool, model_filter: Optional[str]):
                         param_map=param_map,
                         all_unique_keys=config_data.unique,
                         config=config_data,
+                        db_adapter=db_adapter,
                     ):
                         run_sql(conn=conn, sql=sql, dry_run=dry_run, debug=debug)
 
